@@ -1,6 +1,6 @@
-#!/bin/bash -e
+#!/bin/bash
 
-set -uo pipefail
+set -euo pipefail
 
 # Soft colors for elegant output
 RESET='\033[0m'
@@ -20,54 +20,99 @@ CYAN='\033[38;5;87m'
 # Optimized configurations for SSD
 SSD_SCRUB_SETTINGS=("--limit" "500M")
 
+# Check if terminal supports colors and UTF-8
+check_terminal_capabilities() {
+    if [[ -n "${TERM:-}" && "${TERM}" != "dumb" ]]; then
+        if command -v tput > /dev/null && tput colors > /dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    # Disable all colors and special characters if terminal doesn't support them
+    RESET=''; BOLD=''; DIM=''; ITALIC=''
+    BLUE=''; GREEN=''; YELLOW=''; ORANGE=''; RED=''; PURPLE=''; CYAN=''
+    return 1
+}
+
 # Elegant utility functions
 print_header() {
     local title="$1"
-    echo -e "${BOLD}${BLUE}╔════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${BOLD}${BLUE}║${RESET} ${BOLD}${CYAN}$title${RESET} ${BOLD}${BLUE}║${RESET}"
-    echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════╝${RESET}"
+    if [[ -n "${BOLD}" ]]; then
+        echo -e "${BOLD}${BLUE}╔════════════════════════════════════════════════════════════╗${RESET}"
+        echo -e "${BOLD}${BLUE}║${RESET} ${BOLD}${CYAN}${title}${RESET} ${BOLD}${BLUE}║${RESET}"
+        echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════╝${RESET}"
+    else
+        echo "=== ${title} ==="
+    fi
     echo
 }
 
 print_section() {
     local title="$1"
-    echo -e "${DIM}${BLUE}── ${BOLD}$title ${BLUE}──${RESET}"
+    if [[ -n "${DIM}" ]]; then
+        echo -e "${DIM}${BLUE}── ${BOLD}${title} ${BLUE}──${RESET}"
+    else
+        echo "-- ${title} --"
+    fi
 }
 
 print_success() {
-    echo -e "${GREEN}✓${RESET} ${BOLD}$1${RESET}"
+    if [[ -n "${GREEN}" ]]; then
+        echo -e "${GREEN}✓${RESET} ${BOLD}$1${RESET}"
+    else
+        echo "[SUCCESS] $1"
+    fi
 }
 
 print_warning() {
-    echo -e "${YELLOW}⚠${RESET} ${BOLD}$1${RESET}"
+    if [[ -n "${YELLOW}" ]]; then
+        echo -e "${YELLOW}⚠${RESET} ${BOLD}$1${RESET}"
+    else
+        echo "[WARNING] $1"
+    fi
 }
 
 print_error() {
-    echo -e "${RED}✗${RESET} ${BOLD}$1${RESET}"
+    if [[ -n "${RED}" ]]; then
+        echo -e "${RED}✗${RESET} ${BOLD}$1${RESET}"
+    else
+        echo "[ERROR] $1"
+    fi
 }
 
 print_info() {
-    echo -e "${BLUE}ℹ${RESET} ${BOLD}$1${RESET}"
+    if [[ -n "${BLUE}" ]]; then
+        echo -e "${BLUE}ℹ${RESET} ${BOLD}$1${RESET}"
+    else
+        echo "[INFO] $1"
+    fi
 }
 
 print_bullet() {
-    echo -e "${DIM}${BLUE}•${RESET} $1"
+    if [[ -n "${DIM}" ]]; then
+        echo -e "${DIM}${BLUE}•${RESET} $1"
+    else
+        echo "• $1"
+    fi
 }
 
 draw_separator() {
-    echo -e "${DIM}${BLUE}────────────────────────────────────────────────────────────────${RESET}"
+    if [[ -n "${DIM}" ]]; then
+        echo -e "${DIM}${BLUE}────────────────────────────────────────────────────────────────${RESET}"
+    else
+        echo "----------------------------------------"
+    fi
 }
 
 spinner() {
-    local pid=$1
+    local pid="$1"
     local delay=0.1
-    local spinstr='⣾⣽⣻⢿⡿⣟⣯⣷'
+    local spinstr='|/-\'
     
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
+    while ps -p "${pid}" > /dev/null 2>&1; do
+        local temp="${spinstr#?}"
+        printf " [%c]  " "${spinstr}"
+        local spinstr="${temp}${spinstr%"$temp"}"
+        sleep "${delay}"
         printf "\b\b\b\b\b\b"
     done
     printf "    \b\b\b\b"
@@ -76,20 +121,41 @@ spinner() {
 # Function to get device info
 get_device_type() {
     local mount_point="$1"
-    local devices=$(btrfs filesystem show "$mount_point" 2>/dev/null | grep -o '/dev/[^ ]*' | head -1)
+    local devices
+    local device_type="unknown"
     
-    for device in $devices; do
-        if [[ -e "$device" ]]; then
-            if [[ $(lsblk -d -o rota "$device" 2>/dev/null | tail -1) -eq 0 ]]; then
-                echo "ssd"
-                return
-            else
-                echo "hdd"
-                return
+    if ! devices=$(btrfs filesystem show "${mount_point}" 2>/dev/null | grep -o '/dev/[^ ]*'); then
+        echo "unknown"
+        return 1
+    fi
+    
+    # Check all devices and determine type
+    local ssd_count=0
+    local hdd_count=0
+    local total_count=0
+    
+    for device in ${devices}; do
+        if [[ -e "${device}" ]]; then
+            if lsblk -d -o rota "${device}" > /dev/null 2>&1; then
+                if [[ $(lsblk -d -o rota "${device}" 2>/dev/null | tail -1) -eq 0 ]]; then
+                    ssd_count=$((ssd_count + 1))
+                else
+                    hdd_count=$((hdd_count + 1))
+                fi
+                total_count=$((total_count + 1))
             fi
         fi
     done
-    echo "unknown"
+    
+    if [[ ${total_count} -eq 0 ]]; then
+        echo "unknown"
+    elif [[ ${ssd_count} -eq ${total_count} ]]; then
+        echo "ssd"
+    elif [[ ${hdd_count} -eq ${total_count} ]]; then
+        echo "hdd"
+    else
+        echo "mixed"
+    fi
 }
 
 # Requirements checking function
@@ -100,46 +166,47 @@ check_requirements() {
     
     # Check Bash version
     if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
-        print_error "Bash 4.0+ required (current: $BASH_VERSION)"
+        print_error "Bash 4.0+ required (current: ${BASH_VERSION})"
         missing=$((missing + 1))
     else
-        print_success "Bash version: $BASH_VERSION"
+        print_success "Bash version: ${BASH_VERSION}"
     fi
 
     # Check BTRFS tools
-    if ! command -v btrfs &> /dev/null; then
+    if ! command -v btrfs > /dev/null 2>&1; then
         print_error "btrfs-progs not installed"
         missing=$((missing + 1))
     else
-        local btrfs_version=$(btrfs version | head -1)
-        print_success "BTRFS: $btrfs_version"
+        local btrfs_version
+        btrfs_version=$(btrfs version | head -1)
+        print_success "BTRFS: ${btrfs_version}"
     fi
 
     # Check core utilities
-    local core_tools=("mount" "awk" "grep" "lsblk")
+    local core_tools=("mount" "awk" "grep" "lsblk" "ps")
     for tool in "${core_tools[@]}"; do
-        if ! command -v "$tool" &> /dev/null; then
-            print_warning "$tool not found (some features limited)"
+        if ! command -v "${tool}" > /dev/null 2>&1; then
+            print_warning "${tool} not found (some features limited)"
         else
-            print_success "$tool available"
+            print_success "${tool} available"
         fi
     done
 
     # Check optional tools
-    local optional_tools=("ionice" "sysctl" "fio" "hdparm")
+    local optional_tools=("ionice" "sysctl" "fio" "hdparm" "tput")
     for tool in "${optional_tools[@]}"; do
-        if command -v "$tool" &> /dev/null; then
-            print_info "$tool available (enhanced features)"
+        if command -v "${tool}" > /dev/null 2>&1; then
+            print_info "${tool} available (enhanced features)"
         else
-            print_bullet "$tool not found (optional)"
+            print_bullet "${tool} not found (optional)"
         fi
     done
 
     # Check terminal capabilities
-    if [[ -n "$TERM" && "$TERM" != "dumb" ]]; then
-        print_success "Terminal supports colors"
+    if check_terminal_capabilities; then
+        print_success "Terminal supports colors and UTF-8"
     else
-        print_warning "Limited terminal capabilities"
+        print_warning "Limited terminal capabilities - using basic output"
     fi
 
     # Check BTRFS filesystems
@@ -150,8 +217,8 @@ check_requirements() {
     fi
 
     echo
-    if [[ $missing -gt 0 ]]; then
-        print_error "$missing critical requirements missing"
+    if [[ ${missing} -gt 0 ]]; then
+        print_error "${missing} critical requirements missing"
         return 1
     else
         print_success "All requirements satisfied"
@@ -164,27 +231,38 @@ show_btrfs_info() {
     local mount_point="$1"
     local verbose="${2:-false}"
     
-    if [[ ! -d "$mount_point" ]]; then
-        print_error "Mount point '$mount_point' not found or not accessible"
+    if [[ ! -d "${mount_point}" ]]; then
+        print_error "Mount point '${mount_point}' not found or not accessible"
         return 1
     fi
     
-    local device_type=$(get_device_type "$mount_point")
-    local device_icon="🖴"
-    [[ "$device_type" == "ssd" ]] && device_icon="⚡"
-    [[ "$device_type" == "hdd" ]] && device_icon="💾"
+    local device_type
+    if ! device_type=$(get_device_type "${mount_point}"); then
+        device_type="unknown"
+    fi
     
-    print_header "BTRFS FILESYSTEM ${device_icon}  $mount_point"
+    local device_icon=""
+    if [[ -n "${BOLD}" ]]; then
+        case "${device_type}" in
+            "ssd") device_icon="⚡" ;;
+            "hdd") device_icon="💾" ;;
+            "mixed") device_icon="🔀" ;;
+            *) device_icon="🖴" ;;
+        esac
+    fi
+    
+    print_header "BTRFS FILESYSTEM ${device_icon}  ${mount_point}"
     
     echo -e "${DIM}Device type: ${BOLD}${device_type^^}${RESET}"
     echo
 
     # Filesystem information in elegant layout
     print_section "BASIC INFORMATION"
-    if btrfs filesystem show "$mount_point" 2>/dev/null | while read -r line; do
-        echo -e "  ${DIM}${line}${RESET}"
-    done; then
-        true
+    local fs_info
+    if fs_info=$(btrfs filesystem show "${mount_point}" 2>/dev/null); then
+        while IFS= read -r line; do
+            echo -e "  ${DIM}${line}${RESET}"
+        done <<< "${fs_info}"
     else
         print_error "Cannot show filesystem information"
     fi
@@ -194,40 +272,55 @@ show_btrfs_info() {
     # Storage usage in a clean format
     print_section "STORAGE USAGE"
     echo -e "  ${BOLD}Device usage:${RESET}"
-    btrfs device usage "$mount_point" 2>/dev/null | while read -r line; do
-        print_bullet "$line"
-    done
+    local device_usage
+    if device_usage=$(btrfs device usage "${mount_point}" 2>/dev/null); then
+        while IFS= read -r line; do
+            print_bullet "${line}"
+        done <<< "${device_usage}"
+    else
+        print_error "Cannot show device usage"
+    fi
     
     echo
     echo -e "  ${BOLD}Filesystem usage:${RESET}"
-    btrfs filesystem usage "$mount_point" 2>/dev/null | while read -r line; do
-        print_bullet "$line"
-    done
+    local fs_usage
+    if fs_usage=$(btrfs filesystem usage "${mount_point}" 2>/dev/null); then
+        while IFS= read -r line; do
+            print_bullet "${line}"
+        done <<< "${fs_usage}"
+    else
+        print_error "Cannot show filesystem usage"
+    fi
     
     draw_separator
     
     # Space information
     print_section "SPACE ALLOCATION"
-    btrfs filesystem df "$mount_point" 2>/dev/null | while read -r line; do
-        print_bullet "$line"
-    done
+    local space_info
+    if space_info=$(btrfs filesystem df "${mount_point}" 2>/dev/null); then
+        while IFS= read -r line; do
+            print_bullet "${line}"
+        done <<< "${space_info}"
+    else
+        print_error "Cannot show space allocation"
+    fi
     
     draw_separator
     
     # Scrub status with visual indicators
     print_section "SCRUB STATUS"
-    local scrub_status=$(btrfs scrub status "$mount_point" 2>/dev/null)
-    if [[ $? -eq 0 ]]; then
-        if echo "$scrub_status" | grep -q "running"; then
+    local scrub_status
+    if scrub_status=$(btrfs scrub status "${mount_point}" 2>/dev/null); then
+        if echo "${scrub_status}" | grep -q "running"; then
             echo -e "  ${YELLOW}⏳ Scrub in progress${RESET}"
-        elif echo "$scrub_status" | grep -q "finished"; then
+        elif echo "${scrub_status}" | grep -q "finished"; then
             echo -e "  ${GREEN}✅ Scrub completed${RESET}"
         else
             echo -e "  ${BLUE}💤 Scrub not running${RESET}"
         fi
-        echo "$scrub_status" | while read -r line; do
-            print_bullet "$line"
-        done
+        while IFS= read -r line; do
+            print_bullet "${line}"
+        done <<< "${scrub_status}"
     else
         echo -e "  ${DIM}Scrub status unavailable${RESET}"
     fi
@@ -236,21 +329,21 @@ show_btrfs_info() {
     
     # Device statistics
     print_section "DEVICE STATISTICS"
-    local stats=$(btrfs device stats "$mount_point" 2>/dev/null)
-    if [[ -n "$stats" ]]; then
-        echo "$stats" | while read -r line; do
-            if echo "$line" | grep -q "0$"; then
-                print_bullet "$line"
+    local stats_output
+    if stats_output=$(btrfs device stats "${mount_point}" 2>/dev/null); then
+        while IFS= read -r line; do
+            if echo "${line}" | grep -q " 0$"; then
+                print_bullet "${line}"
             else
-                echo -e "  ${ORANGE}⚠  $line${RESET}"
+                echo -e "  ${ORANGE}⚠  ${line}${RESET}"
             fi
-        done
+        done <<< "${stats_output}"
     else
         echo -e "  ${DIM}No device statistics available${RESET}"
     fi
     
     # SSD optimizations hint
-    if [[ "$device_type" == "ssd" ]]; then
+    if [[ "${device_type}" == "ssd" ]] || [[ "${device_type}" == "mixed" ]]; then
         draw_separator
         print_section "OPTIMIZATIONS"
         print_bullet "${CYAN}SSD-optimized scrub available${RESET}"
@@ -260,45 +353,71 @@ show_btrfs_info() {
     echo
 }
 
+# Run scrub and capture PID for background monitoring
+run_scrub_background() {
+    local mount_point="$1"
+    shift
+    local scrub_args=("$@")
+    
+    btrfs scrub start "${scrub_args[@]}" "${mount_point}" 2>&1 &
+    local pid=$!
+    echo "${pid}"
+}
+
 # Graceful scrub function
 optimized_scrub() {
     local mount_point="$1"
     local device_type="$2"
     
     print_header "STARTING OPTIMIZED SCRUB"
-    echo -e "${DIM}Device: ${BOLD}$mount_point${RESET}"
+    echo -e "${DIM}Device: ${BOLD}${mount_point}${RESET}"
     echo -e "${DIM}Type: ${BOLD}${device_type^^}${RESET}"
     echo
     
-    case $device_type in
+    local scrub_pid
+    local scrub_args=()
+    
+    case "${device_type}" in
         "ssd")
             print_success "Using SSD-optimized settings"
-            echo -e "${DIM}Batch workers: 8 | Limit: 500MB/s | Throttle: 100${RESET}"
+            echo -e "${DIM}Batch workers: 8 | Limit: 500MB/s${RESET}"
             echo
-            
-            if btrfs scrub start -c 2 -n 7 ${SSD_SCRUB_SETTINGS[@]} "$mount_point" 2>&1 & then
-                local pid=$!
-                spinner $pid
-                wait $pid
-                print_success "Scrub started successfully"
-            else
-                print_warning "Falling back to standard settings"
-                btrfs scrub start -B "$mount_point"
-            fi
+            scrub_args=(-c 2 -n 7 "${SSD_SCRUB_SETTINGS[@]}")
             ;;
         "hdd")
             print_info "Using HDD-optimized settings"
             echo -e "${DIM}Batch workers: 2 | Limit: 100MB/s${RESET}"
             echo
-            btrfs scrub start -c 2 -n 2 --limit 100M "$mount_point"
+            scrub_args=(-c 2 -n 2 --limit 100M)
             ;;
-        *)
-            print_info "Using default settings"
-            btrfs scrub start -B "$mount_point"
+        "mixed"|"unknown")
+            print_info "Using balanced settings for ${device_type} devices"
+            echo -e "${DIM}Batch workers: 4 | Limit: 200MB/s${RESET}"
+            echo
+            scrub_args=(-c 2 -n 4 --limit 200M)
             ;;
     esac
     
+    # Run scrub in background
+    if ! scrub_pid=$(run_scrub_background "${mount_point}" "${scrub_args[@]}"); then
+        print_error "Failed to start scrub process"
+        return 1
+    fi
+    
+    # Show spinner while scrub runs
+    spinner "${scrub_pid}"
+    
+    # Wait for process to complete and get exit status
+    if wait "${scrub_pid}"; then
+        print_success "Scrub completed successfully"
+    else
+        local exit_code=$?
+        print_error "Scrub failed with exit code: ${exit_code}"
+        return "${exit_code}"
+    fi
+    
     echo
+    return 0
 }
 
 # Priority scrub with elegant output
@@ -306,8 +425,12 @@ priority_scrub() {
     local mount_point="$1"
     
     print_header "STARTING PRIORITY SCRUB"
-    echo -e "${DIM}Device: ${BOLD}$mount_point${RESET}"
-    echo -e "${CYAN}⚡ Maximum performance mode activated${RESET}"
+    echo -e "${DIM}Device: ${BOLD}${mount_point}${RESET}"
+    if [[ -n "${CYAN}" ]]; then
+        echo -e "${CYAN}⚡ Maximum performance mode activated${RESET}"
+    else
+        echo "⚡ Maximum performance mode activated"
+    fi
     echo
     
     print_success "Priority settings applied:"
@@ -317,14 +440,19 @@ priority_scrub() {
     print_bullet "Parallel operations: 16"
     echo
     
-    if command -v ionice >/dev/null 2>&1; then
-        ionice -c2 -n0 btrfs scrub start \
-            -c 2 -n 7 \
-            --limit 800M \
-            "$mount_point"
+    local scrub_args=(-c 2 -n 7 --limit 800M)
+    
+    if command -v ionice > /dev/null 2>&1; then
+        if ! ionice -c2 -n0 btrfs scrub start "${scrub_args[@]}" "${mount_point}"; then
+            print_error "Priority scrub failed"
+            return 1
+        fi
     else
         print_warning "ionice not available, using standard priority settings"
-        btrfs scrub start -c 2 -n 7 --limit 800M "$mount_point"
+        if ! btrfs scrub start "${scrub_args[@]}" "${mount_point}"; then
+            print_error "Priority scrub failed"
+            return 1
+        fi
     fi
 }
 
@@ -333,35 +461,53 @@ monitor_scrub() {
     local mount_point="$1"
     
     print_header "SCRUB MONITORING"
-    echo -e "${DIM}Monitoring: ${BOLD}$mount_point${RESET}"
+    echo -e "${DIM}Monitoring: ${BOLD}${mount_point}${RESET}"
     echo -e "${DIM}Press ${BOLD}Ctrl+C${DIM} to exit monitoring${RESET}"
     echo
     
     local first_run=true
+    local last_status=""
+    
     while true; do
-        if [[ "$first_run" != true ]]; then
+        if [[ "${first_run}" != "true" ]]; then
             printf "\033[2K\r"  # Clear line
         else
             first_run=false
         fi
         
-        local status=$(btrfs scrub status "$mount_point" 2>/dev/null)
-        if echo "$status" | grep -q "running"; then
-            local progress=$(echo "$status" | grep -o " [0-9.]*%" | head -1 | tr -d ' ')
-            local speed=$(echo "$status" | grep -o "[0-9.]* MB/s" | head -1)
-            
-            if [[ -n "$progress" ]]; then
-                printf "Progress: ${CYAN}%s${RESET} | Speed: ${GREEN}%s${RESET}" "$progress" "$speed"
-            else
-                printf "Scrub in progress..."
-            fi
-        else
+        local status
+        if ! status=$(btrfs scrub status "${mount_point}" 2>/dev/null); then
             echo
-            print_success "Scrub completed"
-            break
+            print_error "Cannot monitor scrub status"
+            return 1
         fi
         
-        sleep 3
+        # Only update display if status changed
+        if [[ "${status}" != "${last_status}" ]]; then
+            if echo "${status}" | grep -q "running"; then
+                local progress
+                progress=$(echo "${status}" | grep -o " [0-9.]*%" | head -1 | tr -d ' ' || echo "")
+                local speed
+                speed=$(echo "${status}" | grep -o "[0-9.]* MB/s" | head -1 || echo "unknown")
+                
+                if [[ -n "${progress}" ]]; then
+                    printf "Progress: ${CYAN}%s${RESET} | Speed: ${GREEN}%s${RESET}" "${progress}" "${speed}"
+                else
+                    printf "Scrub in progress..."
+                fi
+            else
+                echo
+                if echo "${status}" | grep -q "finished"; then
+                    print_success "Scrub completed successfully"
+                else
+                    print_info "Scrub not running"
+                fi
+                break
+            fi
+            last_status="${status}"
+        fi
+        
+        sleep 2
     done
     echo
 }
@@ -372,12 +518,12 @@ benchmark_scrub_speed() {
     local device_type="$2"
     
     print_header "SCRUB SPEED BENCHMARK"
-    echo -e "${DIM}Device: ${BOLD}$mount_point${RESET}"
+    echo -e "${DIM}Device: ${BOLD}${mount_point}${RESET}"
     echo -e "${DIM}Type: ${BOLD}${device_type^^}${RESET}"
     echo
     
     print_section "EXPECTED PERFORMANCE"
-    case $device_type in
+    case "${device_type}" in
         "ssd")
             print_bullet "${GREEN}NVMe Gen4: 1.5-3.0 GB/s${RESET}"
             print_bullet "${GREEN}NVMe Gen3: 0.8-1.5 GB/s${RESET}"
@@ -388,22 +534,36 @@ benchmark_scrub_speed() {
             print_bullet "${YELLOW}HDD 5400rpm: 80-120 MB/s${RESET}"
             print_bullet "${ORANGE}RAID HDD: 300-600 MB/s${RESET}"
             ;;
+        "mixed")
+            print_bullet "${YELLOW}Mixed devices: 200-400 MB/s${RESET}"
+            print_bullet "${CYAN}Performance depends on SSD/HDD ratio${RESET}"
+            ;;
+        *)
+            print_bullet "${DIM}Unknown device type: using conservative estimates${RESET}"
+            print_bullet "${YELLOW}Expected: 100-300 MB/s${RESET}"
+            ;;
     esac
     
     # Time estimates
-    local total_size=$(btrfs filesystem usage "$mount_point" 2>/dev/null | grep "Device size" | awk '{print $3 $4}')
-    if [[ -n "$total_size" ]]; then
+    local total_size
+    if total_size=$(btrfs filesystem usage "${mount_point}" 2>/dev/null | grep "Device size" | awk '{print $3 $4}'); then
         echo
         print_section "TIME ESTIMATES"
-        case $device_type in
+        case "${device_type}" in
             "ssd")
                 print_bullet "Estimated time: ${GREEN}10-30 minutes${RESET}"
                 ;;
             "hdd")
                 print_bullet "Estimated time: ${YELLOW}1-4 hours${RESET}"
                 ;;
+            "mixed")
+                print_bullet "Estimated time: ${ORANGE}30-90 minutes${RESET}"
+                ;;
+            *)
+                print_bullet "Estimated time: ${YELLOW}1-3 hours${RESET}"
+                ;;
         esac
-        print_bullet "Filesystem size: $total_size"
+        print_bullet "Filesystem size: ${total_size}"
     fi
     echo
 }
@@ -414,25 +574,45 @@ setup_ssd_optimizations() {
     
     local optimized=false
     
-    if [[ $EUID -eq 0 ]]; then
+    if [[ ${EUID} -eq 0 ]]; then
         print_section "APPLYING OPTIMIZATIONS"
+        
+        # Check if sysctl parameter exists before setting
+        if sysctl -a 2>/dev/null | grep -q "dev.btrfs.per_stream_rate_limit"; then
+            if sysctl -w dev.btrfs.per_stream_rate_limit=800000000 > /dev/null 2>&1; then
+                print_success "Set BTRFS per-stream rate limit to 800MB/s"
+                optimized=true
+            else
+                print_warning "Failed to set BTRFS rate limit"
+            fi
+        else
+            print_info "BTRFS rate limit parameter not available in this kernel"
+        fi
+        
+        # Apply disk-specific optimizations
         for disk in $(lsblk -d -o NAME | grep -v NAME); do
-            if [[ -f "/sys/block/$disk/queue/rotational" ]] && [[ $(cat "/sys/block/$disk/queue/rotational") -eq 0 ]]; then
-                echo -e "  Optimizing ${CYAN}$disk${RESET} (SSD)"
-                echo 1024 > "/sys/block/$disk/queue/nr_requests" 2>/dev/null && optimized=true
-                echo "none" > "/sys/block/$disk/queue/scheduler" 2>/dev/null && optimized=true
+            if [[ -f "/sys/block/${disk}/queue/rotational" ]]; then
+                if [[ $(cat "/sys/block/${disk}/queue/rotational") -eq 0 ]]; then
+                    echo -e "  Optimizing ${CYAN}${disk}${RESET} (SSD)"
+                    if echo 1024 > "/sys/block/${disk}/queue/nr_requests" 2>/dev/null; then
+                        optimized=true
+                    fi
+                    if echo "none" > "/sys/block/${disk}/queue/scheduler" 2>/dev/null; then
+                        optimized=true
+                    fi
+                fi
             fi
         done
         
-        if sysctl -w dev.btrfs.per_stream_rate_limit=800000000 2>/dev/null; then
-            optimized=true
-        fi
     else
         print_warning "Root privileges required for system optimizations"
+        print_info "To make optimizations persistent, add to /etc/sysctl.conf:"
+        print_bullet "dev.btrfs.per_stream_rate_limit=800000000"
     fi
     
-    if [[ "$optimized" == true ]]; then
+    if [[ "${optimized}" == "true" ]]; then
         print_success "System optimizations applied successfully"
+        print_warning "These are temporary changes. Add to system configuration for persistence."
     else
         print_info "Using application-level optimizations only"
     fi
@@ -472,14 +652,22 @@ show_help() {
     echo
 }
 
+# Get all mounted BTRFS filesystems
+get_btrfs_mounts() {
+    mount | grep -E '^[^ ]+ on .* type btrfs' | awk '{print $3}' || true
+}
+
 # Main function with elegant command handling
 main() {
     local command="info"
     local args=()
     
+    # Check terminal capabilities first
+    check_terminal_capabilities
+    
     # Parse main command
     if [[ $# -gt 0 ]]; then
-        case $1 in
+        case "$1" in
             -h|--help|help)
                 show_help
                 exit 0
@@ -489,7 +677,9 @@ main() {
                 shift
                 ;;
             *)
-                command="info"
+                print_error "Unknown command: $1"
+                show_help
+                exit 1
                 ;;
         esac
     fi
@@ -501,36 +691,40 @@ main() {
     local auto_monitor=false
     
     while [[ $# -gt 0 ]]; do
-        case $1 in
+        case "$1" in
             -a|--all) show_all=true ;;
             -v|--verbose) verbose=true ;;
             -p|--priority) priority_mode="priority" ;;
             -m|--monitor) auto_monitor=true ;;
+            --) shift; args+=("$@"); break ;;
             *) args+=("$1") ;;
         esac
         shift
     done
     
-    case $command in
+    case "${command}" in
         info)
-            if [[ "$show_all" == true ]] || [[ ${#args[@]} -eq 0 ]]; then
+            if [[ "${show_all}" == "true" ]] || [[ ${#args[@]} -eq 0 ]]; then
                 local found=false
-                while IFS= read -r line; do
-                    mount_point=$(echo "$line" | awk '{print $3}')
-                    if [[ -n "$mount_point" ]]; then
-                        found=true
-                        show_btrfs_info "$mount_point" "$verbose"
-                    fi
-                done < <(mount | grep btrfs || true)
+                local mounts
+                mounts=$(get_btrfs_mounts)
                 
-                if [[ "$found" == false ]]; then
+                if [[ -z "${mounts}" ]]; then
                     print_error "No mounted BTRFS filesystems found"
                     echo
-                    echo -e "${DIM}Usage: $0 [mount_point]${RESET}"
+                    echo -e "${DIM}Usage: $0 info [mount_point]${RESET}"
                     exit 1
                 fi
+                
+                while IFS= read -r mount_point; do
+                    if [[ -n "${mount_point}" ]]; then
+                        found=true
+                        show_btrfs_info "${mount_point}" "${verbose}"
+                    fi
+                done <<< "${mounts}"
+                
             else
-                show_btrfs_info "${args[0]}" "$verbose"
+                show_btrfs_info "${args[0]}" "${verbose}"
             fi
             ;;
             
@@ -542,20 +736,32 @@ main() {
             fi
             
             local mount_point="${args[0]}"
-            local device_type=$(get_device_type "$mount_point")
-            
-            if [[ "$priority_mode" == "priority" ]]; then
-                priority_scrub "$mount_point"
-            else
-                optimized_scrub "$mount_point" "$device_type"
+            if [[ ! -d "${mount_point}" ]]; then
+                print_error "Mount point '${mount_point}' not found or not accessible"
+                exit 1
             fi
             
-            if [[ "$auto_monitor" == true ]]; then
+            local device_type
+            if ! device_type=$(get_device_type "${mount_point}"); then
+                device_type="unknown"
+            fi
+            
+            if [[ "${priority_mode}" == "priority" ]]; then
+                if ! priority_scrub "${mount_point}"; then
+                    exit 1
+                fi
+            else
+                if ! optimized_scrub "${mount_point}" "${device_type}"; then
+                    exit 1
+                fi
+            fi
+            
+            if [[ "${auto_monitor}" == "true" ]]; then
                 sleep 2
-                monitor_scrub "$mount_point"
+                monitor_scrub "${mount_point}"
             else
                 echo
-                print_info "Use '$0 monitor $mount_point' to monitor progress"
+                print_info "Use '$0 monitor ${mount_point}' to monitor progress"
             fi
             ;;
             
@@ -577,30 +783,28 @@ main() {
                 exit 1
             fi
             local mount_point="${args[0]}"
-            local device_type=$(get_device_type "$mount_point")
-            benchmark_scrub_speed "$mount_point" "$device_type"
+            if [[ ! -d "${mount_point}" ]]; then
+                print_error "Mount point '${mount_point}' not found or not accessible"
+                exit 1
+            fi
+            local device_type
+            if ! device_type=$(get_device_type "${mount_point}"); then
+                device_type="unknown"
+            fi
+            benchmark_scrub_speed "${mount_point}" "${device_type}"
             ;;
             
         check-requirements)
-            check_requirements
+            if ! check_requirements; then
+                exit 1
+            fi
             ;;
     esac
 }
 
-# Graceful execution
-if [[ $# -eq 0 ]]; then
-    # Show all filesystems by default
-    mount | grep btrfs | while read -r line; do
-        mount_point=$(echo "$line" | awk '{print $3}')
-        show_btrfs_info "$mount_point"
-    done
-    
-    if ! mount | grep -q btrfs; then
-        print_error "No mounted BTRFS filesystems found"
-        echo
-        echo -e "${DIM}Usage: $0 [mount_point]${RESET}"
-        exit 1
-    fi
-else
-    main "$@"
-fi
+# Graceful execution with error handling
+trap 'print_error "Script interrupted by user"; exit 130' INT TERM
+
+# Always use main function for consistent behavior
+main "$@"
+
